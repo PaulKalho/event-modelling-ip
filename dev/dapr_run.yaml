@@ -1,0 +1,41 @@
+version: 1
+
+common:
+  daprdLogDestination: console
+  appLogDestination: console
+  appChannelAddress: 127.0.0.1
+  appProtocol: grpc
+  configFilePath: "./dapr.yaml"
+  env:
+    # If true, building of services will fail
+    # when the local Git repository is in an unexpected state
+    # to gather information about Git.
+    GOFLAGS: "-buildvcs=false"
+
+    SECRETSTORE_REDIS_HOST: "redis:6379"
+
+    MODE: development
+    LOG_LEVEL: debug
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: 5432
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    EVENTSTORE_CS: esdb://admin:changeit@eventstore:2113?tls=false
+    INSECURE_FAKE_TOKEN_ENABLE: true
+    REDIS_ADDR: redis:6379
+    INSECURE_REDIS_NO_TLS: true
+
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    OTEL_EXPORTER_OTLP_INSECURE: true
+
+    ZED_TOKEN: helpwave
+
+apps:
+  - appID: tasks-svc
+    appDirPath: ../services/tasks-svc
+    appPort: 3004
+    appProtocol: http
+    env:
+      SERVICE: tasks-svc
+      POSTGRES_DB: tasks-svc
+    command: ["air"]

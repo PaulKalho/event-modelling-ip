@@ -1,0 +1,100 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:base"
+  ],
+  "dependencyDashboard": true,
+  "dependencyDashboardLabels": [
+    "deps"
+  ],
+  "labels": [
+    "deps"
+  ],
+  "timezone": "Europe/Berlin",
+  "schedule": [
+    "* 18-21 * * 5"
+  ],
+  "major": {
+    "dependencyDashboardApproval": true
+  },
+  "rangeStrategy": "pin",
+  "ignorePaths": [
+    "infrastructure/**",
+    "gen/**"
+  ],
+  "packageRules": [
+    {
+      "groupName": "all non-major {{manager}} dependencies",
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ]
+    },
+    {
+      "groupName": "all major {{manager}} dependencies",
+      "matchUpdateTypes": [
+        "major"
+      ]
+    },
+    {
+      "matchDatasources": ["github-releases"],
+      "extractVersion": "^v?(?<version>.*)$"
+    }
+  ],
+  "ignoreDeps": ["common", "decaying_lru", "hwdb", "hwes", "hwutil", "hwlocale", "telemetry", "gen", "postgres"],
+  "customDatasources": {
+     "buf": {
+        "defaultRegistryUrlTemplate": "https://buf-resource-proxy.fly.dev/{{packageName}}",
+        "transformTemplates": ["{\"releases\":[{\"version\": resource.plugin.version }], \"sourceUrl\": resource.plugin.sourceUrl, \"homepage\": $join([\"https://buf.build/\", resource.plugin.owner, \"/\", resource.plugin.name])}"]
+     } 
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": ["^.*Dockerfile(\\.[\\w_-]+)?$"],
+      "matchStrings": [
+        "datasource=(?<datasource>.*?) depName=(?<depName>.*?)( versioning=(?<versioning>.*?))?\\s(ENV|ARG) .*?_VERSION=(?<currentValue>.*)\\s"
+      ],
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": ["(^|/)(\\.github/(?:workflows|actions))/.+\\.ya?ml$"],
+      "matchStrings": [
+        "datasource=(?<datasource>.*?) depName=(?<depName>.*?)( versioning=(?<versioning>.*?))?\\s.*?_VERSION: '?(?<currentValue>[0-9A-Za-z.-]+)'?\\s"
+      ],
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": ["dev/docker-compose.yaml", "images/dev-go/update-dev-tag.sh", ".github/workflows/cicd.yaml"],
+      "matchStrings": [
+        "# renovate: dev-tag\\s+TAG='(?<currentValue>[0-9A-Za-z.-]+)'\\s",
+        "# renovate: dev-tag\\s+TAG: '?(?<currentValue>[0-9A-Za-z.-]+)'?\\s",
+        "# renovate: dev-tag\\s+DEV_TAG: '?(?<currentValue>[0-9A-Za-z.-]+)'?\\s"
+      ],
+      "depNameTemplate": "ghcr.io/helpwave/dev-go",
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "go.mod$"
+      ],
+      "matchStrings": [
+        "\\sgo (?<currentValue>.+?)\\s"
+      ],
+      "depNameTemplate": "golang",
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": ["buf.gen.yaml$"],
+      "matchStrings": [
+        "plugin: buf.build/(?<depName>.*?):(?<currentValue>.+?)\\s"
+      ],
+      "datasourceTemplate": "custom.buf",
+      "versioningTemplate": "semver"
+    }
+  ]
+}

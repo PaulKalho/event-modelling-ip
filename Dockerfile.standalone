@@ -1,0 +1,89 @@
+# you probably don't want to use this Dockerfile directly,
+# use `make <svc>` instead
+
+# builder builds a go service
+# the build args SERVICE and VERSION must be set!
+
+FROM golang:1.23-bookworm AS builder
+
+#
+# build service
+#
+
+ARG SERVICE
+ARG VERSION
+
+WORKDIR /build/app
+
+COPY libs /libs
+COPY gen /gen
+
+COPY services/$SERVICE/go.* ./
+RUN go mod download
+
+COPY services/$SERVICE /build/app
+
+# create migrations, if it does not exist already
+# allows us to copy it into the production image w/o error
+RUN mkdir -p migrations
+
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-X main.Version=${VERSION}" -a -o app .
+
+FROM debian:12.6 AS deps
+
+# renovate: datasource=github-releases depName=DarthSim/hivemind
+ARG HIVEMIND_VERSION=1.1.0
+# renovate: datasource=github-releases depName=golang-migrate/migrate
+ARG MIGRATE_VERSION=4.18.1
+# renovate: datasource=github-releases depName=dapr/dapr
+ARG DAPR_VERSION=1.14.4
+
+RUN apt update && \
+	apt install -y wget
+
+# get hivemind
+RUN wget -q -O hivemind.gz https://github.com/DarthSim/hivemind/releases/download/v$HIVEMIND_VERSION/hivemind-v$HIVEMIND_VERSION-linux-amd64.gz && \
+	gunzip hivemind.gz && \
+    chmod +x hivemind
+
+# get migrate
+RUN wget -q https://github.com/golang-migrate/migrate/releases/download/v$MIGRATE_VERSION/migrate.linux-amd64.tar.gz -O - | tar -xzvf - migrate
+
+# get daprd
+RUN wget -q https://github.com/dapr/dapr/releases/download/v$DAPR_VERSION/daprd_linux_amd64.tar.gz -O - | tar -xzvf - daprd
+
+FROM alpine:3.20.2 AS production
+
+RUN apk update && apk add postgresql-client --no-cache
+
+ARG SERVICE
+# APP_PROTOCOL can be grpc or http
+ARG APP_PROTOCOL=grpc
+
+WORKDIR /app
+
+# copy deps
+COPY --from=deps /hivemind /usr/bin/hivemind
+COPY --from=deps /migrate /usr/bin/migrate
+COPY --from=deps /daprd /usr/bin/daprd
+COPY dapr dapr
+COPY Procfile.standalone Procfile
+
+# copy app
+COPY --from=builder /build/app/app .
+COPY --from=builder /build/app/migrations ./migrations
+COPY docker-run-migrations.sh ./run-migrations.sh
+
+# fix permissions
+RUN chmod +x run-migrations.sh
+
+ENV DAPR_APP_ID=$SERVICE
+# DAPR_HTTP_READ_BUFFER_SIZE: default 4KB
+ENV DAPR_HTTP_READ_BUFFER_SIZE=8
+ENV DAPR_LOG_LEVEL=info
+ENV APP_PROTOCOL=$APP_PROTOCOL
+ENV ADDR=":80"
+ENV MODE=development
+ENV LOG_LEVEL=debug
+
+CMD ["hivemind"]

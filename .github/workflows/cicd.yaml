@@ -1,0 +1,137 @@
+name: cicd
+
+on:
+  push:
+    branches: [ '*' ]
+    tags: [ 'v*' ]
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  # renovate: dev-tag
+  DEV_TAG: '15'
+
+jobs:
+
+  envs:
+    runs-on: ubuntu-22.04
+    steps:
+      - run: echo "This is needed because sometimes env is not accessible, whereas the output of this step is"
+    outputs:
+      DEV_TAG: ${{ env.DEV_TAG }}
+
+  detect-changes:
+    runs-on: ubuntu-22.04
+    outputs:
+      services: ${{ steps.aggregate-changes.outputs.services }}
+      libs: ${{ steps.aggregate-changes.outputs.libs }}
+      images: ${{ steps.aggregate-changes.outputs.images }}
+      commit_hash: ${{ steps.commit.outputs.short }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changes in libs
+        id: changes-in-libs
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            .github/**
+            libs/**
+            .dockerignore
+            Dockerfile.service
+
+      - name: Detect changes in services
+        id: changes-in-services
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            services/*-svc/**
+
+      - name: Detect changes in images
+        id: changes-in-images
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            images/**
+
+      - name: Aggregate changes
+        id: aggregate-changes
+        run: |
+          echo "images=$(echo $changesInImages | awk -F / '$1 ~ /images/ {print $2}' | uniq | grep -v dev-go-custom | jq -R . | jq -sc .)" >> $GITHUB_OUTPUT
+
+          if [[ "$libsChanged" == "true" ]]; then
+            echo "services=$(ls services | uniq | jq -R . | jq -sc .)" >> $GITHUB_OUTPUT
+            echo "libs=$(ls libs | uniq | jq -R . | jq -sc .)" >> $GITHUB_OUTPUT
+            echo "images=$(ls images | grep -v dev-go-custom | uniq | jq -R . | jq -sc .)" >> $GITHUB_OUTPUT
+          else
+            echo "services=$(echo $changesInServices | awk -F / '$1 ~ /services/ {print $2}' | uniq | jq -R . | jq -sc .)" >> $GITHUB_OUTPUT
+          fi
+        env:
+          libsChanged: ${{ steps.changes-in-libs.outputs.any_changed }}
+          changesInServices: ${{ steps.changes-in-services.outputs.all_changed_files }}
+          changesInImages: ${{ steps.changes-in-images.outputs.all_changed_files }}
+
+      - name: Get commit hash
+        id: commit
+        uses: pr-mpt/actions-commit-hash@v3
+        with:
+          commit: "${{ github.sha }}"
+
+      - name: Summarize
+        run: |
+          echo "services: $services" >> $GITHUB_STEP_SUMMARY
+          echo "images: $images" >> $GITHUB_STEP_SUMMARY
+        env:
+          services: ${{ steps.aggregate-changes.outputs.services }}
+          images: ${{ steps.aggregate-changes.outputs.images }}
+
+  cicd-go:
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.services != '[]' && needs.detect-changes.outputs.services != '' }}
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+    permissions:
+      contents: read
+      pull-requests: read
+      packages: write
+    uses: ./.github/workflows/cicd-go.yaml
+    with:
+      deploy: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+      service: ${{ matrix.service }}
+    secrets: inherit
+
+  ci-go-libs:
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.libs != '[]' && needs.detect-changes.outputs.libs != '' }}
+    strategy:
+      matrix:
+        lib: ${{ fromJson(needs.detect-changes.outputs.libs) }}
+    uses: ./.github/workflows/ci-go-libs.yaml
+    with:
+      lib: ${{ matrix.lib }}
+    secrets: inherit
+
+  cicd-images:
+    needs:
+     - detect-changes
+     - envs
+    if: ${{ needs.detect-changes.outputs.images != '[]' && needs.detect-changes.outputs.images != '' }}
+    strategy:
+      matrix:
+        image: ${{ fromJson(needs.detect-changes.outputs.images) }}
+    permissions:
+      contents: read
+      pull-requests: read
+      packages: write
+    uses: ./.github/workflows/cicd-images.yaml
+    with:
+      deploy: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+      image: ${{ matrix.image }}
+      custom_tag: ${{ matrix.image == 'dev-go' && needs.envs.outputs.DEV_TAG || '' }}
+    secrets: inherit

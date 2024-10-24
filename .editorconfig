@@ -1,0 +1,38 @@
+# More on EditorConfig: https://EditorConfig.org
+
+# top-most EditorConfig file
+root = true
+
+# Unix-style newlines with a newline ending every file
+[*]
+end_of_line = lf
+insert_final_newline = true
+charset = utf-8
+indent_style = tab
+indent_size = 4
+
+[*.yaml]
+indent_style = space
+indent_size = 2
+
+[*.tf]
+indent_style = space
+indent_size = 2
+
+# https://protobuf.dev/programming-guides/style/#standard-file-formatting
+[*.proto]
+indent_style = space
+indent_size = 2
+max_line_length = 80
+
+[*.toml]
+indent_style = space
+indent_size = 2
+
+[*.nix]
+indent_style = space
+indent_size = 2
+
+[*.json]
+indent_style = space
+indent_size = 2

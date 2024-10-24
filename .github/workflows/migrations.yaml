@@ -1,0 +1,219 @@
+name: migrations
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  # renovate: datasource=github-releases depName=golang-migrate/migrate
+  MIGRATE_VERSION: '4.18.1'
+  # renovate: datasource=github-releases depName=superfly/flyctl versioning=semver
+  FLY_CLI_VERSION: '0.3.24'
+  # renovate: datasource=github-releases depName=sqlc-dev/sqlc
+  SQLC_VERSION: '1.27.0'
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-22.04
+    outputs:
+      # Stringified JSON Array of changed services
+      services: ${{ steps.changes.outputs.all_changed_files }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Collect the services, which have changes in their migrations directory.
+      # Available in ${{ steps.changes.outputs.all_changed_files }}
+      # as a json array (it's a string)
+      - name: Detect changes in migrations
+        id: changes
+        uses: tj-actions/changed-files@v44
+        with:
+          json: "true"
+          escape_json: "false"
+          dir_names: "true"
+          dir_names_exclude_current_dir: "true"
+          dir_names_max_depth: 1
+          path: "services"
+          files: ./*/migrations/**
+
+      # Summary for debugging
+      - name: Summarize
+        run: |
+          echo "services: $services" >> $GITHUB_STEP_SUMMARY
+        env:
+          services: ${{ steps.changes.outputs.all_changed_files }}
+
+  disallow-modifications:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect modifications in migrations
+        id: changes
+        uses: tj-actions/changed-files@v44
+        with:
+          json: "true"
+          escape_json: "false"
+          path: "services"
+          files: ./*/migrations/**
+      - name: Don't modify existing migrations!
+        if: steps.changes.outputs.modified_files != '[]'
+        uses: helpwave/pg-fingerprint-action@main
+        with:
+          root: "services"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          files: ${{ steps.changes.outputs.modified_files }}
+
+  migrations:
+    runs-on: ubuntu-22.04
+    needs: detect-changes
+    if: needs.detect-changes.outputs.services != '[]'
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+
+    env:
+      svc: ${{ matrix.service }}
+      FLY_DB_APP: ${{ secrets.STAGING_DB_FLY_DB_APP }}
+      REMOTE_DB: ${{ vars.STAGING_DB_REMOTE_DB_PREFIX }}${{ matrix.service }}
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres # will be overwritten in "Pull staging data"
+
+    services:
+      postgres:
+        image: postgres:15.6
+        # Set health checks to wait until postgres has started
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+    steps:
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+        with:
+          version: ${{ env.FLY_CLI_VERSION }}
+      # ubuntu-22.04 ships with psql 14.x,
+      # whose pg_dump is incompatible with our postgres server (15.x)
+      - name: Setup postgres client
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /etc/apt/trusted.gpg.d/pgdg.asc &>/dev/null
+          sudo apt update
+          sudo apt remove postgresql-client
+          sudo apt install postgresql-client-15 -y
+          /usr/lib/postgresql/15/bin/pg_dump --version
+      - name: install migrate
+        run: |
+          TEMP_DEB="$(mktemp)"
+          wget -O "$TEMP_DEB" 'https://github.com/golang-migrate/migrate/releases/download/v${{ env.MIGRATE_VERSION }}/migrate.linux-amd64.deb'
+          sudo dpkg -i "$TEMP_DEB"
+          rm -f "$TEMP_DEB"
+      - name: install sqlc
+        run: wget -qO- https://downloads.sqlc.dev/sqlc_${{ env.SQLC_VERSION }}_linux_amd64.tar.gz | sudo tar xvz -C /usr/bin
+      - name: Clone Repo
+        uses: actions/checkout@v4
+      - name: Open tunnel to staging db
+        run: |
+          flyctl proxy 5431:5432 -a $FLY_DB_APP &
+          count=0
+          max_attempts=10
+
+          until pg_isready -h localhost -p 5431; do
+            if [ $count -ge $max_attempts ]; then
+              echo "PostgreSQL is not ready after $max_attempts attempts. Exiting..."
+              exit 1
+            fi
+
+            echo "Waiting for PostgreSQL to be ready... (Attempt $((count+1))/$max_attempts)"
+            sleep 3
+
+            count=$((count+1))
+          done
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Pull staging data
+        run: |
+          # service-name -> service_name
+          REMOTE_DB=$(echo "$REMOTE_DB" | sed "s/-/_/g")
+          # Build URIs
+          REMOTE=postgres://$STAGING_DB_USER:$STAGING_DB_PASS@localhost:5431/$REMOTE_DB
+          LOCAL=postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@$POSTGRES_HOST:$POSTGRES_PORT/$POSTGRES_DB
+          # Remote -> SQL -> Local
+          /usr/lib/postgresql/15/bin/pg_dump -C -c --if-exists --no-comments -O -x $REMOTE -f dump.sql
+          /usr/lib/postgresql/15/bin/psql -q $LOCAL -f dump.sql
+          # Use newly created database from now on
+          echo "POSTGRES_DB=$REMOTE_DB" >> "$GITHUB_ENV"
+        env:
+          STAGING_DB_USER: ${{ secrets.STAGING_DB_USER }}
+          STAGING_DB_PASS: ${{ secrets.STAGING_DB_PASS }}
+      - name: Collect current version
+        id: collect-version
+        run: |
+          echo -n "VERSION=" > $GITHUB_OUTPUT
+
+          # for some reason, beyond my comprehension,
+          # the output of migrate is sent to stderr in the CI, but stdout on local
+          version_output=$(./migrate.sh $svc version 2>&1 | tail -n1)
+    
+          # Check if the version_output is a number
+          if [[ $version_output =~ ^[0-9]+$ ]]; then
+            echo $version_output >> $GITHUB_OUTPUT
+          else
+            echo "Error: Version is not a number: $version_output" >&2
+            echo "0" >> $GITHUB_OUTPUT
+          fi
+      - name: Check version
+        run: |
+          ./migrate.sh $svc desired
+          if [ "$current" -ge "$(./migrate.sh $svc desired)" ]; then
+            echo "Migrations must be newer than the version of staging! You probably lack behind, merge or rebase onto main first!"
+            exit 1
+          fi
+        env:
+          current: ${{ steps.collect-version.outputs.VERSION }}
+
+      - name: Run UP migrations (1/2)
+        run: ./migrate.sh $svc up
+      - name: Generate schema.sql
+        run: |
+          /usr/lib/postgresql/15/bin/pg_dump \
+            postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@$POSTGRES_HOST:$POSTGRES_PORT/$POSTGRES_DB \
+            --schema-only -O > ./services/${{ matrix.service }}/schema.sql
+
+          sed 's/\(-- Dumped from database version [0-9]\+\.[0-9]\+\).*/\1/' -i ./services/${{ matrix.service }}/schema.sql
+          sed 's/\(-- Dumped by pg_dump version [0-9]\+\.[0-9]\+\).*/\1/' -i ./services/${{ matrix.service }}/schema.sql
+      - name: Generate models
+        run: cd services/${{ matrix.service }} && sqlc generate
+      - name: Verify schema.sql and models were generated properly before
+        run: git diff --exit-code -- services/${{ matrix.service }} || (echo "You forgot to run ./models.sh before checking in" && exit 1)
+      - name: Run DOWN migrations (1/2)
+        run: |
+          [ "$VERSION" -eq 0 ] && yes | ./migrate.sh $svc down || ./migrate.sh $svc goto $VERSION
+        env:
+          VERSION: ${{ steps.collect-version.outputs.VERSION }}
+      - name: Run UP migrations (2/2)
+        run: ./migrate.sh $svc up
+      - name: Run DOWN migrations (2/2)
+        run: |
+          [ "$VERSION" -eq 0 ] && yes | ./migrate.sh $svc down || ./migrate.sh $svc goto $VERSION
+        env:
+          VERSION: ${{ steps.collect-version.outputs.VERSION }}
